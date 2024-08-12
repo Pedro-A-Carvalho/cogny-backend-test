@@ -1,6 +1,7 @@
 const { DATABASE_SCHEMA, DATABASE_URL, SHOW_PG_MONITOR } = require('./config');
 const massive = require('massive');
 const monitor = require('pg-monitor');
+const axios = require('axios');
 
 // Call start
 (async () => {
@@ -65,17 +66,57 @@ const monitor = require('pg-monitor');
     try {
         await migrationUp();
 
-        //exemplo de insert
-        const result1 = await db[DATABASE_SCHEMA].api_data.insert({
-            doc_record: { 'a': 'b' },
-        })
-        console.log('result1 >>>', result1);
+        //Busca os dados da API no formato json com axios
+        const { data } = await axios.get('https://datausa.io/api/data?drilldowns=Nation&measures=Population');
 
-        //exemplo select
-        const result2 = await db[DATABASE_SCHEMA].api_data.find({
-            is_active: true
+        //deleta os dados da tabela api_data
+        await db[DATABASE_SCHEMA].api_data.destroy({});
+
+        //insere os dados no banco na coluna doc_record
+        await db[DATABASE_SCHEMA].api_data.insert({
+            api_name: data.source[0].name,
+            doc_id: data.source[0].annotations.table_id,
+            doc_name: data.source[0].annotations.dataset_name,
+            doc_record: JSON.stringify(data.data),
         });
-        console.log('result2 >>>', result2);
+
+        //realizando o calculo de populacao em memoria
+        const calculatePopulationFunction = () => {
+            const filteredData = data.data.filter(item => item.Year >= 2018 && item.Year <= 2020);
+            const population = filteredData.reduce((acc, item) => acc + item.Population, 0);
+            return population;
+        }
+
+        //realizando o calculo de populacao atraves de select
+        const calculatePopulationSelect = async () => {
+            const result = await db.query(`
+                WITH pop_year AS (
+                    SELECT 
+                        (jsonb_array_elements(doc_record)->>'Population')::INTEGER AS population,
+                        (jsonb_array_elements(doc_record)->>'Year')::INTEGER AS year
+                    FROM 
+                        ${DATABASE_SCHEMA}.api_data
+                )
+                SELECT 
+                    SUM(population) AS total_population
+                FROM 
+                    pop_year
+                WHERE 
+                    year IN (2018, 2019, 2020)
+            `);
+            return result[0].total_population;
+        }
+
+        //realizando o calculo usando a view
+        const calculatePopulationView = async () => {
+            const result = await db[DATABASE_SCHEMA].vw_population_sum.find();
+            return result[0].total_population;
+        }
+
+        console.log('caculando a populacao dos anos de 2018, 2019 e 2020');
+        console.log('calculatePopulationFunction', calculatePopulationFunction());
+        console.log('calculatePopulationSelect', await calculatePopulationSelect());
+        console.log('calculatePopulationView', await calculatePopulationView());
 
     } catch (e) {
         console.log(e.message)
